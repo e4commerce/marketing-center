@@ -85,6 +85,18 @@ export type SourceDefinition = {
   readOnly: true;
 };
 
+export type UserRole = "admin" | "manager" | "viewer";
+
+export type AccessUser = {
+  id: string;
+  email: string;
+  name: string;
+  role: UserRole;
+  active: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type BootstrapData = {
   media: MediaAsset[];
   folders: HubFolder[];
@@ -92,6 +104,7 @@ export type BootstrapData = {
   audit: AuditEvent[];
   connections: ConnectionStatus;
   sources: SourceDefinition[];
-  user: { name: string; role: "admin" | "manager" | "viewer" };
+  user: AccessUser;
+  users: AccessUser[];
   demoMode: boolean;
 };

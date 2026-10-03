@@ -2,10 +2,10 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  Archive, ArrowLeft, Check, ChevronDown, ChevronRight, CircleAlert, Cloud, Download, FileImage, Folder,
+  Archive, ArrowLeft, Check, ChevronRight, CircleAlert, Cloud, Download, FileImage, Folder,
   FolderInput, FolderPlus, Grid2X2, HardDrive, Image as ImageIcon, LayoutDashboard, List, LoaderCircle,
-  Menu, MoreHorizontal, MoveRight, Play, Plus, RefreshCw, Search, Settings, ShieldCheck, SlidersHorizontal,
-  Sparkles, Tag, Trash2, UploadCloud, Video, WandSparkles, X,
+  KeyRound, LogOut, Menu, MoreHorizontal, MoveRight, Play, Plus, RefreshCw, Search, Settings, ShieldCheck,
+  SlidersHorizontal, Sparkles, Tag, Trash2, UploadCloud, UserPlus, Users, Video, WandSparkles, X,
 } from "lucide-react";
 import type { BootstrapData, HubFolder, MediaAsset } from "@/lib/types";
 
@@ -121,6 +121,7 @@ export function MediaHub() {
   }, [data, query, kind, selectedFolder, view]);
 
   const notify = (text: string, tone: Notice["tone"] = "success") => setNotice({ text, tone });
+  const logout = async () => { try { await api("session", { method: "DELETE" }); } finally { setData(null); setAuthRequired(true); } };
   if (authRequired) return <Login onDone={() => void load()} />;
   if (!data) return <div className="boot"><div className="brand-mark">M</div><LoaderCircle className="spin" /><span>Preparando seu acervo</span></div>;
 
@@ -131,10 +132,10 @@ export function MediaHub() {
     <aside className={`sidebar ${mobileNav ? "sidebar-open" : ""}`}>
       <div className="brand"><div className="brand-mark">M</div><div><strong>Murano</strong><span>Media Hub</span></div></div>
       <button className="primary wide" onClick={() => { setUploadOpen(true); setMobileNav(false); }}><Plus size={18} /> Enviar arquivos</button>
-      <nav>{NAV.map(({ id, label, icon: Icon }) => <button key={id} className={view === id ? "active" : ""} onClick={() => { setView(id); setSelectedFolder(null); setMobileNav(false); }}><Icon size={18} /><span>{label}</span>{id === "review" && reviewCount > 0 && <em>{reviewCount}</em>}</button>)}</nav>
+      <nav>{NAV.filter((item) => item.id !== "settings" || data.user.role === "admin").map(({ id, label, icon: Icon }) => <button key={id} className={view === id ? "active" : ""} onClick={() => { setView(id); setSelectedFolder(null); setMobileNav(false); }}><Icon size={18} /><span>{label}</span>{id === "review" && reviewCount > 0 && <em>{reviewCount}</em>}</button>)}</nav>
       <div className="sidebar-space" />
       <div className="storage-card"><div><HardDrive size={17} /><span>Drive Murano</span></div><strong>{data.connections.destination ? "Conectado" : "Modo local"}</strong><p>{data.connections.destination ? "Arquivos sincronizados" : "Conecte em Configurações"}</p></div>
-      <div className="account"><div className="avatar">TM</div><div><strong>{data.user.name}</strong><span>Administrador</span></div><ChevronDown size={16} /></div>
+      <button className="account" onClick={() => void logout()} title="Sair da conta"><div className="avatar">{data.user.name.split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase()}</div><div><strong>{data.user.name}</strong><span>{data.user.email}</span></div><LogOut size={15} /></button>
     </aside>
     {mobileNav && <button aria-label="Fechar menu" className="scrim nav-scrim" onClick={() => setMobileNav(false)} />}
 
@@ -151,7 +152,7 @@ export function MediaHub() {
         {view === "library" && <Library title="Biblioteca" subtitle={`${data.media.length} materiais catalogados`} items={filtered} query={query} kind={kind} setKind={setKind} display={display} setDisplay={setDisplay} onOpen={setSelected} onUpload={() => setUploadOpen(true)} />}
         {view === "review" && <Library title="Revisão" subtitle={`${reviewCount} item${reviewCount === 1 ? "" : "s"} precisam de atenção`} items={filtered} query={query} kind={kind} setKind={setKind} display={display} setDisplay={setDisplay} onOpen={setSelected} onUpload={() => setUploadOpen(true)} review />}
         {view === "folders" && <Folders data={data} selectedFolder={selectedFolder} setSelectedFolder={setSelectedFolder} items={filtered} onOpen={setSelected} onCreate={() => setFolderOpen(true)} />}
-        {view === "settings" && <SettingsView data={data} notify={notify} reload={load} />}
+        {view === "settings" && data.user.role === "admin" && <><SettingsView data={data} notify={notify} reload={load} /><UserAccessPanel data={data} notify={notify} reload={load} /></>}
       </div>
       {activeJobs.length > 0 && <div className="job-toast"><LoaderCircle size={17} className="spin" /><div><strong>{activeJobs[0].message || "Processando materiais"}</strong><span>{activeJobs[0].progress}% concluído</span></div><div className="job-progress"><i style={{ width: `${activeJobs[0].progress}%` }} /></div></div>}
     </main>
@@ -164,9 +165,9 @@ export function MediaHub() {
 }
 
 function Login({ onDone }: { onDone: () => void }) {
-  const [password, setPassword] = useState(""); const [error, setError] = useState(""); const [busy, setBusy] = useState(false);
-  async function submit(event: React.FormEvent) { event.preventDefault(); setBusy(true); setError(""); try { await api("session", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password }) }); onDone(); } catch (e) { setError((e as Error).message); } finally { setBusy(false); } }
-  return <div className="login-page"><div className="login-card"><div className="brand-mark large">M</div><p className="eyebrow">MURANO JOIAS</p><h1>Seu acervo, finalmente encontrável.</h1><p>Entre para organizar, pesquisar e reutilizar todos os materiais de marketing.</p><form onSubmit={submit}><label>Senha de acesso</label><input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoFocus placeholder="Digite sua senha" />{error && <span className="form-error">{error}</span>}<button className="primary" disabled={busy}>{busy ? <LoaderCircle className="spin" size={18} /> : <ArrowLeft className="login-arrow" size={18} />} Entrar</button></form></div><div className="login-art"><div className="art-orbit orbit-one" /><div className="art-orbit orbit-two" /><div className="art-card art-a"><Tag size={19} /><span>água</span><span>verão</span></div><div className="art-card art-b"><Sparkles size={19} /><strong>94%</strong><span>catalogado</span></div><div className="art-card art-c"><Search size={22} /><span>mão na água</span></div></div></div>;
+  const [email, setEmail] = useState("thiago@muranojoias.com.br"); const [password, setPassword] = useState(""); const [error, setError] = useState(""); const [busy, setBusy] = useState(false);
+  async function submit(event: React.FormEvent) { event.preventDefault(); setBusy(true); setError(""); try { await api("session", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email, password }) }); onDone(); } catch (e) { setError((e as Error).message); } finally { setBusy(false); } }
+  return <div className="login-page"><div className="login-card"><div className="brand-mark large">M</div><p className="eyebrow">MURANO JOIAS</p><h1>Seu acervo, finalmente encontrável.</h1><p>Entre para organizar, pesquisar e reutilizar todos os materiais de marketing.</p><form onSubmit={submit}><label>E-mail<input type="email" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="username" autoFocus placeholder="voce@muranojoias.com.br" /></label><label>Senha<input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" placeholder="Digite sua senha" /></label>{error && <span className="form-error">{error}</span>}<button className="primary" disabled={busy || !email || !password}>{busy ? <LoaderCircle className="spin" size={18} /> : <ArrowLeft className="login-arrow" size={18} />} Entrar</button></form></div><div className="login-art"><div className="art-orbit orbit-one" /><div className="art-orbit orbit-two" /><div className="art-card art-a"><Tag size={19} /><span>água</span><span>verão</span></div><div className="art-card art-b"><Sparkles size={19} /><strong>94%</strong><span>catalogado</span></div><div className="art-card art-c"><Search size={22} /><span>mão na água</span></div></div></div>;
 }
 
 function Home({ data, reviewCount, onSearch, onOpen, onUpload, onReview }: { data: BootstrapData; reviewCount: number; onSearch: (q: string) => void; onOpen: (asset: MediaAsset) => void; onUpload: () => void; onReview: () => void }) {
@@ -263,6 +264,41 @@ function SettingsView({ data, notify, reload }: { data: BootstrapData; notify: (
   async function provision() { setBusy("provision"); try { await api("drive/provision", { method: "POST" }); await reload(); notify("Estrutura criada no Drive novo."); } catch (e) { notify((e as Error).message, "error"); } finally { setBusy(""); } }
   async function startImport(id: string) { setBusy(id); try { await api(`imports/${id}`, { method: "POST" }); await reload(); notify("Importação iniciada. As origens permanecerão intactas."); } catch (e) { notify((e as Error).message, "error"); } finally { setBusy(""); } }
   return <section className="page-section settings-page"><div className="page-heading"><div><span className="eyebrow">ADMINISTRAÇÃO</span><h1>Configurações</h1><p>Integrações e regras do acervo.</p></div></div>{data.demoMode && <div className="demo-banner"><Sparkles size={18} /><div><strong>Modo demonstração ativo</strong><p>Você pode testar todo o fluxo localmente. Conecte as integrações abaixo para operar com arquivos reais.</p></div></div>}<div className="settings-grid"><section className="settings-card"><div className="settings-title"><span className="google-icon">G</span><div><h2>Google Drive</h2><p>Destino novo e fontes protegidas</p></div><StatusPill ok={data.connections.destination} /></div><div className="connection-row"><div><strong>Drive novo da Murano</strong><p>{data.connections.destinationRootId ? `Raiz: ${data.connections.destinationRootId}` : "Ainda sem pasta raiz"}</p></div><a className="secondary" href="/api/hub/drive/connect?role=destination">{data.connections.destination ? "Reconectar" : "Conectar"}</a></div><div className="connection-row"><div><strong>Pastas de origem</strong><p>Acesso exclusivo para leitura</p></div><a className="secondary" href="/api/hub/drive/connect?role=source">{data.connections.source ? "Reconectar" : "Conectar"}</a></div><label>ID de uma raiz já criada (opcional)<input name="murano_destination_root" autoComplete="off" value={values.destinationRootId} onChange={(e) => setValues({ ...values, destinationRootId: e.target.value })} placeholder="Cole o ID da pasta do Drive novo" /></label><button className="secondary wide" disabled={!data.connections.destination || busy === "provision"} onClick={provision}>{busy === "provision" ? <LoaderCircle className="spin" size={17} /> : <FolderInput size={17} />} Criar estrutura oficial no Drive</button></section><section className="settings-card"><div className="settings-title"><span className="openrouter-icon"><WandSparkles size={19} /></span><div><h2>OpenRouter</h2><p>Análise visual e catalogação</p></div><StatusPill ok={data.connections.openrouter} /></div><label>API key<input name="murano_openrouter_key" autoComplete="new-password" type="password" value={values.openrouterApiKey} onChange={(e) => setValues({ ...values, openrouterApiKey: e.target.value })} placeholder={data.connections.openrouter ? "Chave configurada ••••••••" : "sk-or-v1-..."} /></label><div className="model-row"><span>Modelo atual</span><strong>{data.connections.model}</strong></div><p className="security-note"><ShieldCheck size={15} /> A chave é cifrada e nunca enviada ao navegador depois de salva.</p></section></div><section className="settings-card full"><div className="settings-title"><span className="source-icon"><Archive size={19} /></span><div><h2>Carga inicial</h2><p>Copie materiais para o Drive novo sem alterar as origens.</p></div></div><div className="source-list">{data.sources.map((source) => <div key={source.id}><span><Folder size={19} fill="currentColor" /></span><div><strong>{source.name}</strong><p>{source.folderId}</p></div><span className="readonly"><ShieldCheck size={13} /> Somente leitura</span><button className="secondary" disabled={!data.connections.source || !data.connections.destination || busy === source.id} onClick={() => startImport(source.id)}>{busy === source.id ? <LoaderCircle className="spin" size={16} /> : <Cloud size={16} />} Importar cópias</button></div>)}</div></section><section className="settings-card full credentials"><div className="settings-title"><span className="credential-icon"><Settings size={19} /></span><div><h2>Credenciais Google OAuth</h2><p>Necessárias apenas para ativar as conexões acima.</p></div></div><div className="form-grid"><label>Client ID<input name="murano_google_client_id" autoComplete="off" value={values.googleClientId} onChange={(e) => setValues({ ...values, googleClientId: e.target.value })} placeholder="...apps.googleusercontent.com" /></label><label>Client Secret<input name="murano_google_client_secret" autoComplete="new-password" type="password" value={values.googleClientSecret} onChange={(e) => setValues({ ...values, googleClientSecret: e.target.value })} placeholder="••••••••" /></label></div><div className="settings-save"><p>Callback: <code>{typeof window !== "undefined" ? `${window.location.origin}/api/hub/drive/callback` : "/api/hub/drive/callback"}</code></p><button className="primary" onClick={save} disabled={busy === "save"}>{busy === "save" ? <LoaderCircle className="spin" size={17} /> : <ShieldCheck size={17} />} Salvar com segurança</button></div></section></section>;
+}
+
+function UserAccessPanel({ data, notify, reload }: { data: BootstrapData; notify: (text: string, tone?: Notice["tone"]) => void; reload: (quiet?: boolean) => Promise<void> }) {
+  const [newUser, setNewUser] = useState({ name: "", email: "", password: "", role: "manager" });
+  const [passwords, setPasswords] = useState({ currentPassword: "", newPassword: "" });
+  const [busy, setBusy] = useState("");
+  const roleLabel = { admin: "Administrador", manager: "Editor", viewer: "Visualização" } as const;
+
+  async function createUser(event: React.FormEvent) {
+    event.preventDefault(); setBusy("create");
+    try {
+      await api("users", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(newUser) });
+      setNewUser({ name: "", email: "", password: "", role: "manager" });
+      await reload(); notify("Usuário criado com sucesso.");
+    } catch (error) { notify((error as Error).message, "error"); } finally { setBusy(""); }
+  }
+
+  async function toggleUser(id: string, active: boolean) {
+    setBusy(id);
+    try {
+      await api(`users/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ active }) });
+      await reload(); notify(active ? "Acesso reativado." : "Acesso desativado.");
+    } catch (error) { notify((error as Error).message, "error"); } finally { setBusy(""); }
+  }
+
+  async function updatePassword(event: React.FormEvent) {
+    event.preventDefault(); setBusy("password");
+    try {
+      await api("account/password", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(passwords) });
+      notify("Senha alterada. Entre novamente com a nova senha.");
+      window.setTimeout(() => window.location.reload(), 700);
+    } catch (error) { notify((error as Error).message, "error"); setBusy(""); }
+  }
+
+  return <section className="page-section settings-page access-page"><section className="settings-card full"><div className="settings-title"><span className="users-icon"><Users size={19} /></span><div><h2>Usuários e acessos</h2><p>Contas individuais com permissões e sessões separadas.</p></div></div><div className="user-list">{data.users.map((user) => <div key={user.id} className={!user.active ? "inactive" : ""}><div className="avatar">{user.name.split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase()}</div><div><strong>{user.name}</strong><p>{user.email}</p></div><span className={`role-pill role-${user.role}`}>{roleLabel[user.role]}</span><button className="secondary" disabled={user.id === data.user.id || busy === user.id} onClick={() => void toggleUser(user.id, !user.active)}>{busy === user.id ? <LoaderCircle className="spin" size={15} /> : user.active ? "Desativar" : "Reativar"}</button></div>)}</div></section><div className="settings-grid access-forms"><form className="settings-card" onSubmit={createUser}><div className="settings-title"><span className="user-add-icon"><UserPlus size={19} /></span><div><h2>Novo usuário</h2><p>Crie um acesso individual para a equipe.</p></div></div><label>Nome<input value={newUser.name} onChange={(e) => setNewUser({ ...newUser, name: e.target.value })} placeholder="Nome completo" /></label><label>E-mail<input type="email" value={newUser.email} onChange={(e) => setNewUser({ ...newUser, email: e.target.value })} placeholder="nome@muranojoias.com.br" /></label><div className="form-grid"><label>Senha inicial<input type="password" minLength={8} value={newUser.password} onChange={(e) => setNewUser({ ...newUser, password: e.target.value })} placeholder="Mínimo de 8 caracteres" /></label><label>Permissão<select value={newUser.role} onChange={(e) => setNewUser({ ...newUser, role: e.target.value })}><option value="manager">Editor</option><option value="viewer">Visualização</option><option value="admin">Administrador</option></select></label></div><button className="primary" disabled={busy === "create" || !newUser.name || !newUser.email || newUser.password.length < 8}>{busy === "create" ? <LoaderCircle className="spin" size={16} /> : <UserPlus size={16} />} Criar usuário</button></form><form className="settings-card" onSubmit={updatePassword}><div className="settings-title"><span className="password-icon"><KeyRound size={19} /></span><div><h2>Alterar minha senha</h2><p>A alteração encerra todas as suas sessões.</p></div></div><label>Senha atual<input type="password" autoComplete="current-password" value={passwords.currentPassword} onChange={(e) => setPasswords({ ...passwords, currentPassword: e.target.value })} /></label><label>Nova senha<input type="password" autoComplete="new-password" minLength={8} value={passwords.newPassword} onChange={(e) => setPasswords({ ...passwords, newPassword: e.target.value })} placeholder="Mínimo de 8 caracteres" /></label><button className="secondary wide" disabled={busy === "password" || !passwords.currentPassword || passwords.newPassword.length < 8}>{busy === "password" ? <LoaderCircle className="spin" size={16} /> : <KeyRound size={16} />} Atualizar senha</button></form></div></section>;
 }
 
 function StatusPill({ ok }: { ok: boolean }) { return <span className={`connection-pill ${ok ? "ok" : ""}`}><i />{ok ? "Conectado" : "Pendente"}</span>; }

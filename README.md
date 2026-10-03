@@ -19,7 +19,8 @@ MVP funcional da biblioteca inteligente de mídias da Murano Joias. O produto re
 - cópia para o Drive novo antes de qualquer organização;
 - bloqueios de escrita para IDs pertencentes às fontes;
 - lixeira, e não exclusão definitiva, para arquivos do Drive novo;
-- proteção opcional por senha.
+- acesso individual por e-mail e senha, com perfis de administrador, editor e visualização;
+- gestão de usuários, encerramento de sessão e troca de senha.
 
 ## Rodar agora
 
@@ -37,7 +38,6 @@ Preencha no ambiente ou pela tela **Configurações**:
 
 ```dotenv
 APP_URL=https://seu-dominio
-MURANO_ACCESS_PASSWORD=uma-senha-interna-forte
 MURANO_SESSION_SECRET=um-segredo-aleatorio-longo
 OPENROUTER_API_KEY=...
 OPENROUTER_MODEL=openai/gpt-4.1-mini
@@ -48,6 +48,17 @@ MEDIA_HUB_DATA_DIR=/caminho/persistente
 ```
 
 As chaves inseridas na interface são cifradas com AES-256-GCM e guardadas no diretório de dados. O arquivo `encryption.key` e o banco SQLite precisam de volume persistente e backup protegido.
+
+### Primeiro acesso
+
+Na primeira inicialização de um banco vazio, a plataforma cria o administrador inicial:
+
+```text
+E-mail: thiago@muranojoias.com.br
+Senha: admin123
+```
+
+A senha é transformada em hash `scrypt` com salt individual antes de ser gravada. Altere-a em **Configurações → Alterar minha senha** após o primeiro acesso. Novos usuários podem ser criados por um administrador na mesma tela.
 
 ### Railway
 
@@ -102,7 +113,7 @@ Para vídeos enviados pela plataforma, o navegador extrai três quadros distribu
 ## Segurança e limites atuais
 
 - limite de 200 MB por arquivo e 50 arquivos por lote;
-- autenticação por senha interna no MVP; recomenda-se Google Workspace SSO antes de abertura para toda a empresa;
+- autenticação individual por e-mail e senha, com sessões revogáveis e permissões aplicadas no servidor; recomenda-se Google Workspace SSO em uma fase posterior;
 - o SQLite é adequado ao MVP em uma única instância; migre para PostgreSQL antes de escalar horizontalmente;
 - uploads locais ficam em `.data/uploads`; com Drive conectado, a cópia oficial fica no Drive novo;
 - ações administrativas complexas são melhores no desktop, mas upload, busca, preview e revisão funcionam no celular;

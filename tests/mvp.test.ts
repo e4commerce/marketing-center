@@ -3,9 +3,10 @@ import test from "node:test";
 import sharp from "sharp";
 import { SOURCE_FOLDERS } from "../lib/constants";
 import type { MediaAsset } from "../lib/types";
-import { all, get, put } from "../server/db";
+import { all, db, get, put } from "../server/db";
 import { attachVideoFrames } from "../server/media";
 import { normalize, searchMedia } from "../server/search";
+import { authenticateUser, listUsers } from "../server/auth";
 
 test("normalização preserva busca sem acentos", () => {
   assert.equal(normalize("Mão na Água"), "mao na agua");
@@ -30,6 +31,17 @@ test("estrutura inicial inclui entrada, revisão e arquivo", () => {
   assert.ok(ids.has("inbox"));
   assert.ok(ids.has("review"));
   assert.ok(ids.has("archive"));
+});
+
+test("administrador inicial autentica por e-mail e senha", () => {
+  const user = authenticateUser("THIAGO@MURANOJOIAS.COM.BR", "admin123");
+  assert.equal(user?.email, "thiago@muranojoias.com.br");
+  assert.equal(user?.role, "admin");
+  assert.equal(authenticateUser("thiago@muranojoias.com.br", "senha-incorreta"), undefined);
+  assert.equal(listUsers().some((item) => item.email === "thiago@muranojoias.com.br"), true);
+  const stored = db.prepare("SELECT password_hash FROM users WHERE email=?").get("thiago@muranojoias.com.br") as { password_hash: string };
+  assert.match(stored.password_hash, /^scrypt\$/);
+  assert.equal(stored.password_hash.includes("admin123"), false);
 });
 
 test("vídeos aceitam quadros visuais para preview e análise", async () => {

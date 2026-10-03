@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { SOURCE_FOLDERS } from "@/lib/constants";
 import type { BootstrapData, HubFolder, MediaAsset } from "@/lib/types";
-import { createSession, currentUser, demoMode, sessionCookie, validPassword } from "@/server/auth";
+import { authenticateUser, changePassword, clearSessionCookie, createAccessUser, createSession, currentUser, demoMode, destroySession, listUsers, sessionCookie, updateAccessUser } from "@/server/auth";
 import { all, auditEvents, enqueue, get, jobs, put } from "@/server/db";
 import { connectionStatus, createDriveFolder, destinationRootId, exchangeOAuth, moveDestinationFile, oauthUrl, provisionDestinationFolders, setDestinationRootId, trashDestinationFile, uploadDestination } from "@/server/drive";
 import { attachVideoFrames, createFolder, createMediaFromBuffer, updateMedia } from "@/server/media";
@@ -13,14 +13,43 @@ export const runtime = "nodejs";
 export const maxDuration = 300;
 
 type Context = { params: Promise<{ path: string[] }> };
+const loginAttempts = new Map<string, { failures: number; blockedUntil: number }>();
+
+function loginKey(request: NextRequest, email: string) {
+  const ip = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || request.headers.get("x-real-ip") || "local";
+  return `${ip}:${email.trim().toLocaleLowerCase("pt-BR")}`;
+}
+
+function assertLoginAllowed(key: string) {
+  const attempt = loginAttempts.get(key);
+  if (!attempt) return;
+  if (attempt.blockedUntil > Date.now()) throw new Error("Muitas tentativas. Aguarde 15 minutos e tente novamente.");
+  if (attempt.blockedUntil) loginAttempts.delete(key);
+}
+
+function recordLogin(key: string, success: boolean) {
+  if (success) { loginAttempts.delete(key); return; }
+  const current = loginAttempts.get(key);
+  const failures = (current?.failures || 0) + 1;
+  loginAttempts.set(key, { failures, blockedUntil: failures >= 5 ? Date.now() + 15 * 60_000 : 0 });
+}
+
 function parts(context: Context) { return context.params.then((value) => value.path || []); }
 function errorResponse(error: unknown, status = 400) {
+  if (error instanceof Error && error.message === "UNAUTHORIZED") return NextResponse.json({ error: "Autenticação necessária." }, { status: 401 });
+  if (error instanceof Error && error.message === "FORBIDDEN") return NextResponse.json({ error: "Seu usuário não tem permissão para esta ação." }, { status: 403 });
   return NextResponse.json({ error: error instanceof Error ? error.message : "Erro inesperado." }, { status });
 }
 function requireUser(request: NextRequest) {
   const user = currentUser(request);
   if (!user) throw new Error("UNAUTHORIZED");
   return user;
+}
+function requireAdmin(user: ReturnType<typeof currentUser>) {
+  if (!user || user.role !== "admin") throw new Error("FORBIDDEN");
+}
+function requireEditor(user: ReturnType<typeof currentUser>) {
+  if (!user || user.role === "viewer") throw new Error("FORBIDDEN");
 }
 function assertSameOrigin(request: NextRequest) {
   const origin = request.headers.get("origin");
@@ -29,7 +58,16 @@ function assertSameOrigin(request: NextRequest) {
   if (fetchSite === "cross-site") throw new Error("Solicitação externa bloqueada.");
 }
 
-const sessionSchema = z.object({ password: z.string().max(300).optional(), name: z.string().trim().min(1).max(80).optional() }).strict();
+const sessionSchema = z.object({ email: z.string().trim().email().max(200), password: z.string().min(1).max(300) }).strict();
+const userCreateSchema = z.object({
+  email: z.string().trim().email().max(200), name: z.string().trim().min(2).max(80),
+  password: z.string().min(8).max(300), role: z.enum(["admin", "manager", "viewer"]),
+}).strict();
+const userPatchSchema = z.object({
+  name: z.string().trim().min(2).max(80).optional(), role: z.enum(["admin", "manager", "viewer"]).optional(),
+  active: z.boolean().optional(), password: z.string().min(8).max(300).optional(),
+}).strict();
+const passwordSchema = z.object({ currentPassword: z.string().min(1).max(300), newPassword: z.string().min(8).max(300) }).strict();
 const folderSchema = z.object({ name: z.string().trim().min(1).max(80), parentId: z.string().min(1).max(100).optional() }).strict();
 const settingsSchema = z.object({
   openrouterApiKey: z.string().max(500).optional(), googleClientId: z.string().max(500).optional(),
@@ -57,7 +95,7 @@ export async function GET(request: NextRequest, context: Context) {
         media: all<MediaAsset>("media").filter((item) => item.status !== "archived"),
         folders: all<HubFolder>("folder").sort((a, b) => a.path.localeCompare(b.path)),
         jobs: jobs(), audit: auditEvents(), connections: connectionStatus(), sources: SOURCE_FOLDERS,
-        user, demoMode: demoMode(),
+        user, users: user.role === "admin" ? listUsers() : [], demoMode: demoMode(),
       };
       return NextResponse.json(data);
     }
@@ -66,12 +104,12 @@ export async function GET(request: NextRequest, context: Context) {
       return NextResponse.json({ media: searchMedia(all<MediaAsset>("media").filter((item) => item.status !== "archived"), query) });
     }
     if (route[0] === "drive" && route[1] === "connect") {
+      requireAdmin(user);
       const role = request.nextUrl.searchParams.get("role") === "source" ? "source" : "destination";
       return NextResponse.redirect(oauthUrl(role));
     }
     return NextResponse.json({ error: "Rota não encontrada." }, { status: 404 });
   } catch (error) {
-    if (error instanceof Error && error.message === "UNAUTHORIZED") return NextResponse.json({ error: "Autenticação necessária." }, { status: 401 });
     return errorResponse(error);
   }
 }
@@ -82,13 +120,27 @@ export async function POST(request: NextRequest, context: Context) {
     if (route[0] === "session") {
       assertSameOrigin(request);
       const body = sessionSchema.parse(await request.json());
-      if (!validPassword(body.password || "")) return NextResponse.json({ error: "Senha incorreta." }, { status: 401 });
-      const session = createSession(body.name || "Thiago");
+      const key = loginKey(request, body.email);
+      assertLoginAllowed(key);
+      const account = authenticateUser(body.email, body.password);
+      recordLogin(key, Boolean(account));
+      if (!account) return NextResponse.json({ error: "E-mail ou senha incorretos." }, { status: 401 });
+      const session = createSession(account);
       return NextResponse.json({ ok: true }, { headers: { "Set-Cookie": sessionCookie(session.token, session.expires) } });
     }
     const user = requireUser(request);
     assertSameOrigin(request);
+    if (route[0] === "account" && route[1] === "password") {
+      const body = passwordSchema.parse(await request.json());
+      changePassword(user.id, body.currentPassword, body.newPassword, user.email);
+      return NextResponse.json({ ok: true }, { headers: { "Set-Cookie": clearSessionCookie() } });
+    }
+    if (route[0] === "users") {
+      requireAdmin(user);
+      return NextResponse.json({ user: createAccessUser(userCreateSchema.parse(await request.json()), user.email) }, { status: 201 });
+    }
     if (route[0] === "upload") {
+      requireEditor(user);
       const form = await request.formData();
       const files = form.getAll("files").filter((entry): entry is File => entry instanceof File);
       const folderId = String(form.get("folderId") || "inbox");
@@ -114,6 +166,7 @@ export async function POST(request: NextRequest, context: Context) {
       return NextResponse.json({ result }, { status: 201 });
     }
     if (route[0] === "folders") {
+      requireEditor(user);
       const body = folderSchema.parse(await request.json());
       const folder = createFolder(body.name || "", body.parentId || "root", user.name);
       const parent = get<HubFolder>("folder", folder.parentId || "root");
@@ -124,20 +177,24 @@ export async function POST(request: NextRequest, context: Context) {
       return NextResponse.json({ folder }, { status: 201 });
     }
     if (route[0] === "media" && route[2] === "reanalyze") {
+      requireEditor(user);
       const media = get<MediaAsset>("media", route[1]);
       if (!media) throw new Error("Arquivo não encontrado.");
       put("media", media.id, { ...media, status: "processing", statusNote: undefined, updatedAt: new Date().toISOString() });
       return NextResponse.json({ job: enqueue("analyze", media.id) }, { status: 202 });
     }
     if (route[0] === "imports" && route[1]) {
+      requireAdmin(user);
       if (!SOURCE_FOLDERS.some((source) => source.id === route[1])) throw new Error("Fonte não autorizada.");
       if (!connectionStatus().source || !connectionStatus().destination) throw new Error("Conecte os Drives de origem e destino antes de importar.");
       return NextResponse.json({ job: enqueue("import-source", route[1]) }, { status: 202 });
     }
     if (route[0] === "drive" && route[1] === "provision") {
+      requireAdmin(user);
       return NextResponse.json({ rootId: await provisionDestinationFolders() });
     }
     if (route[0] === "settings") {
+      requireAdmin(user);
       const body = settingsSchema.parse(await request.json());
       if (body.openrouterApiKey?.trim()) setSecret("openrouter", body.openrouterApiKey.trim());
       if (body.googleClientId?.trim()) setSecret("googleClientId", body.googleClientId.trim());
@@ -147,17 +204,24 @@ export async function POST(request: NextRequest, context: Context) {
     }
     return NextResponse.json({ error: "Rota não encontrada." }, { status: 404 });
   } catch (error) {
-    if (error instanceof Error && error.message === "UNAUTHORIZED") return NextResponse.json({ error: "Autenticação necessária." }, { status: 401 });
     return errorResponse(error);
   }
 }
 
 export async function PATCH(request: NextRequest, context: Context) {
   try {
+    const route = await parts(context);
     const user = requireUser(request);
     assertSameOrigin(request);
-    const route = await parts(context);
+    if (route[0] === "users" && route[1]) {
+      requireAdmin(user);
+      const body = userPatchSchema.parse(await request.json());
+      if (route[1] === user.id && body.active === false) throw new Error("Você não pode desativar o próprio usuário.");
+      if (route[1] === user.id && body.role && body.role !== user.role) throw new Error("Você não pode alterar o próprio nível de acesso.");
+      return NextResponse.json({ user: updateAccessUser(route[1], body, user.email) });
+    }
     if (route[0] !== "media" || !route[1]) return NextResponse.json({ error: "Rota não encontrada." }, { status: 404 });
+    requireEditor(user);
     const body = mediaPatchSchema.parse(await request.json());
     const before = get<MediaAsset>("media", route[1]);
     const media = updateMedia(route[1], body, user.name);
@@ -167,16 +231,20 @@ export async function PATCH(request: NextRequest, context: Context) {
     }
     return NextResponse.json({ media });
   } catch (error) {
-    if (error instanceof Error && error.message === "UNAUTHORIZED") return NextResponse.json({ error: "Autenticação necessária." }, { status: 401 });
     return errorResponse(error);
   }
 }
 
 export async function DELETE(request: NextRequest, context: Context) {
   try {
-    const user = requireUser(request);
-    assertSameOrigin(request);
     const route = await parts(context);
+    assertSameOrigin(request);
+    if (route[0] === "session") {
+      destroySession(request);
+      return NextResponse.json({ ok: true }, { headers: { "Set-Cookie": clearSessionCookie() } });
+    }
+    const user = requireUser(request);
+    requireEditor(user);
     if (route[0] !== "media" || !route[1]) return NextResponse.json({ error: "Rota não encontrada." }, { status: 404 });
     const media = get<MediaAsset>("media", route[1]);
     if (!media) throw new Error("Arquivo não encontrado.");
@@ -184,7 +252,6 @@ export async function DELETE(request: NextRequest, context: Context) {
     const archived = updateMedia(media.id, { status: "archived" }, user.name);
     return NextResponse.json({ media: archived });
   } catch (error) {
-    if (error instanceof Error && error.message === "UNAUTHORIZED") return NextResponse.json({ error: "Autenticação necessária." }, { status: 401 });
     return errorResponse(error);
   }
 }
