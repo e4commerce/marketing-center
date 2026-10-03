@@ -51,11 +51,27 @@ function requireAdmin(user: ReturnType<typeof currentUser>) {
 function requireEditor(user: ReturnType<typeof currentUser>) {
   if (!user || user.role === "viewer") throw new Error("FORBIDDEN");
 }
+function normalizedOrigin(value: string | null | undefined) {
+  if (!value) return undefined;
+  try { return new URL(value).origin; } catch { return undefined; }
+}
 function assertSameOrigin(request: NextRequest) {
   const origin = request.headers.get("origin");
   const fetchSite = request.headers.get("sec-fetch-site");
-  if (origin && origin !== request.nextUrl.origin) throw new Error("Origem da solicitação não autorizada.");
   if (fetchSite === "cross-site") throw new Error("Solicitação externa bloqueada.");
+  if (!origin || fetchSite === "same-origin") return;
+
+  const forwardedHost = request.headers.get("x-forwarded-host")?.split(",")[0]?.trim();
+  const forwardedProto = request.headers.get("x-forwarded-proto")?.split(",")[0]?.trim() || "https";
+  const host = request.headers.get("host")?.split(",")[0]?.trim();
+  const allowedOrigins = new Set([
+    normalizedOrigin(request.nextUrl.origin),
+    normalizedOrigin(process.env.APP_URL),
+    normalizedOrigin(forwardedHost ? `${forwardedProto}://${forwardedHost}` : undefined),
+    normalizedOrigin(host ? `${request.nextUrl.protocol}//${host}` : undefined),
+  ].filter((value): value is string => Boolean(value)));
+
+  if (!allowedOrigins.has(normalizedOrigin(origin) || "")) throw new Error("Origem da solicitação não autorizada.");
 }
 
 const sessionSchema = z.object({ email: z.string().trim().email().max(200), password: z.string().min(1).max(300) }).strict();
