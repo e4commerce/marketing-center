@@ -1,0 +1,190 @@
+import { NextRequest, NextResponse } from "next/server";
+import { z } from "zod";
+import { SOURCE_FOLDERS } from "@/lib/constants";
+import type { BootstrapData, HubFolder, MediaAsset } from "@/lib/types";
+import { createSession, currentUser, demoMode, sessionCookie, validPassword } from "@/server/auth";
+import { all, auditEvents, enqueue, get, jobs, put } from "@/server/db";
+import { connectionStatus, createDriveFolder, destinationRootId, exchangeOAuth, moveDestinationFile, oauthUrl, provisionDestinationFolders, setDestinationRootId, trashDestinationFile, uploadDestination } from "@/server/drive";
+import { attachVideoFrames, createFolder, createMediaFromBuffer, updateMedia } from "@/server/media";
+import { searchMedia } from "@/server/search";
+import { secret, setSecret } from "@/server/secrets";
+
+export const runtime = "nodejs";
+export const maxDuration = 300;
+
+type Context = { params: Promise<{ path: string[] }> };
+function parts(context: Context) { return context.params.then((value) => value.path || []); }
+function errorResponse(error: unknown, status = 400) {
+  return NextResponse.json({ error: error instanceof Error ? error.message : "Erro inesperado." }, { status });
+}
+function requireUser(request: NextRequest) {
+  const user = currentUser(request);
+  if (!user) throw new Error("UNAUTHORIZED");
+  return user;
+}
+function assertSameOrigin(request: NextRequest) {
+  const origin = request.headers.get("origin");
+  const fetchSite = request.headers.get("sec-fetch-site");
+  if (origin && origin !== request.nextUrl.origin) throw new Error("Origem da solicitação não autorizada.");
+  if (fetchSite === "cross-site") throw new Error("Solicitação externa bloqueada.");
+}
+
+const sessionSchema = z.object({ password: z.string().max(300).optional(), name: z.string().trim().min(1).max(80).optional() }).strict();
+const folderSchema = z.object({ name: z.string().trim().min(1).max(80), parentId: z.string().min(1).max(100).optional() }).strict();
+const settingsSchema = z.object({
+  openrouterApiKey: z.string().max(500).optional(), googleClientId: z.string().max(500).optional(),
+  googleClientSecret: z.string().max(500).optional(), destinationRootId: z.string().max(300).optional(),
+}).strict();
+const mediaPatchSchema = z.object({
+  name: z.string().trim().min(1).max(240).optional(), descriptionShort: z.string().max(600).optional(),
+  descriptionFull: z.string().max(6000).optional(), tags: z.array(z.string().trim().min(1).max(80)).max(50).optional(),
+  folderId: z.string().max(100).optional(), status: z.enum(["uploading", "processing", "ready", "review", "error", "archived"]).optional(),
+}).strict();
+
+export async function GET(request: NextRequest, context: Context) {
+  try {
+    const route = await parts(context);
+    if (route[0] === "drive" && route[1] === "callback") {
+      const code = request.nextUrl.searchParams.get("code");
+      const state = request.nextUrl.searchParams.get("state");
+      if (!code || !state) throw new Error("O Google não retornou uma autorização válida.");
+      const role = await exchangeOAuth(code, state);
+      return NextResponse.redirect(new URL(`/?connected=${role}`, request.url));
+    }
+    const user = requireUser(request);
+    if (route[0] === "bootstrap") {
+      const data: BootstrapData = {
+        media: all<MediaAsset>("media").filter((item) => item.status !== "archived"),
+        folders: all<HubFolder>("folder").sort((a, b) => a.path.localeCompare(b.path)),
+        jobs: jobs(), audit: auditEvents(), connections: connectionStatus(), sources: SOURCE_FOLDERS,
+        user, demoMode: demoMode(),
+      };
+      return NextResponse.json(data);
+    }
+    if (route[0] === "search") {
+      const query = request.nextUrl.searchParams.get("q") || "";
+      return NextResponse.json({ media: searchMedia(all<MediaAsset>("media").filter((item) => item.status !== "archived"), query) });
+    }
+    if (route[0] === "drive" && route[1] === "connect") {
+      const role = request.nextUrl.searchParams.get("role") === "source" ? "source" : "destination";
+      return NextResponse.redirect(oauthUrl(role));
+    }
+    return NextResponse.json({ error: "Rota não encontrada." }, { status: 404 });
+  } catch (error) {
+    if (error instanceof Error && error.message === "UNAUTHORIZED") return NextResponse.json({ error: "Autenticação necessária." }, { status: 401 });
+    return errorResponse(error);
+  }
+}
+
+export async function POST(request: NextRequest, context: Context) {
+  try {
+    const route = await parts(context);
+    if (route[0] === "session") {
+      assertSameOrigin(request);
+      const body = sessionSchema.parse(await request.json());
+      if (!validPassword(body.password || "")) return NextResponse.json({ error: "Senha incorreta." }, { status: 401 });
+      const session = createSession(body.name || "Thiago");
+      return NextResponse.json({ ok: true }, { headers: { "Set-Cookie": sessionCookie(session.token, session.expires) } });
+    }
+    const user = requireUser(request);
+    assertSameOrigin(request);
+    if (route[0] === "upload") {
+      const form = await request.formData();
+      const files = form.getAll("files").filter((entry): entry is File => entry instanceof File);
+      const folderId = String(form.get("folderId") || "inbox");
+      if (!files.length) throw new Error("Selecione pelo menos um arquivo.");
+      if (files.length > 50) throw new Error("Envie no máximo 50 arquivos por lote.");
+      const result = [];
+      for (const [index, file] of files.entries()) {
+        const buffer = Buffer.from(await file.arrayBuffer());
+        const frameFiles = form.getAll(`frames_${index}`).filter((entry): entry is File => entry instanceof File);
+        const created = await createMediaFromBuffer(buffer, file.name, file.type || "application/octet-stream", user.name, "upload", { folderId }, file.type.startsWith("video/") ? frameFiles.length === 0 : true);
+        if (!created.duplicate && frameFiles.length) {
+          created.media = await attachVideoFrames(created.media.id, await Promise.all(frameFiles.map(async (frame) => Buffer.from(await frame.arrayBuffer()))));
+        }
+        if (!created.duplicate && connectionStatus().destination && destinationRootId()) {
+          const folder = get<HubFolder>("folder", folderId);
+          const driveId = await uploadDestination(buffer, file.name, file.type, folder?.driveId || destinationRootId());
+          const next = { ...created.media, driveId, updatedAt: new Date().toISOString() };
+          put("media", next.id, next);
+          created.media = next;
+        }
+        result.push(created);
+      }
+      return NextResponse.json({ result }, { status: 201 });
+    }
+    if (route[0] === "folders") {
+      const body = folderSchema.parse(await request.json());
+      const folder = createFolder(body.name || "", body.parentId || "root", user.name);
+      const parent = get<HubFolder>("folder", folder.parentId || "root");
+      if (connectionStatus().destination && parent?.driveId) {
+        folder.driveId = await createDriveFolder(folder.name, parent.driveId);
+        put("folder", folder.id, folder);
+      }
+      return NextResponse.json({ folder }, { status: 201 });
+    }
+    if (route[0] === "media" && route[2] === "reanalyze") {
+      const media = get<MediaAsset>("media", route[1]);
+      if (!media) throw new Error("Arquivo não encontrado.");
+      put("media", media.id, { ...media, status: "processing", statusNote: undefined, updatedAt: new Date().toISOString() });
+      return NextResponse.json({ job: enqueue("analyze", media.id) }, { status: 202 });
+    }
+    if (route[0] === "imports" && route[1]) {
+      if (!SOURCE_FOLDERS.some((source) => source.id === route[1])) throw new Error("Fonte não autorizada.");
+      if (!connectionStatus().source || !connectionStatus().destination) throw new Error("Conecte os Drives de origem e destino antes de importar.");
+      return NextResponse.json({ job: enqueue("import-source", route[1]) }, { status: 202 });
+    }
+    if (route[0] === "drive" && route[1] === "provision") {
+      return NextResponse.json({ rootId: await provisionDestinationFolders() });
+    }
+    if (route[0] === "settings") {
+      const body = settingsSchema.parse(await request.json());
+      if (body.openrouterApiKey?.trim()) setSecret("openrouter", body.openrouterApiKey.trim());
+      if (body.googleClientId?.trim()) setSecret("googleClientId", body.googleClientId.trim());
+      if (body.googleClientSecret?.trim()) setSecret("googleClientSecret", body.googleClientSecret.trim());
+      if (body.destinationRootId?.trim()) setDestinationRootId(body.destinationRootId.trim());
+      return NextResponse.json({ connections: connectionStatus(), configured: { googleClientId: Boolean(secret("googleClientId")), googleClientSecret: Boolean(secret("googleClientSecret")) } });
+    }
+    return NextResponse.json({ error: "Rota não encontrada." }, { status: 404 });
+  } catch (error) {
+    if (error instanceof Error && error.message === "UNAUTHORIZED") return NextResponse.json({ error: "Autenticação necessária." }, { status: 401 });
+    return errorResponse(error);
+  }
+}
+
+export async function PATCH(request: NextRequest, context: Context) {
+  try {
+    const user = requireUser(request);
+    assertSameOrigin(request);
+    const route = await parts(context);
+    if (route[0] !== "media" || !route[1]) return NextResponse.json({ error: "Rota não encontrada." }, { status: 404 });
+    const body = mediaPatchSchema.parse(await request.json());
+    const before = get<MediaAsset>("media", route[1]);
+    const media = updateMedia(route[1], body, user.name);
+    if (body.folderId && before?.driveId) {
+      const folder = get<HubFolder>("folder", body.folderId);
+      if (folder?.driveId) await moveDestinationFile(before.driveId, folder.driveId);
+    }
+    return NextResponse.json({ media });
+  } catch (error) {
+    if (error instanceof Error && error.message === "UNAUTHORIZED") return NextResponse.json({ error: "Autenticação necessária." }, { status: 401 });
+    return errorResponse(error);
+  }
+}
+
+export async function DELETE(request: NextRequest, context: Context) {
+  try {
+    const user = requireUser(request);
+    assertSameOrigin(request);
+    const route = await parts(context);
+    if (route[0] !== "media" || !route[1]) return NextResponse.json({ error: "Rota não encontrada." }, { status: 404 });
+    const media = get<MediaAsset>("media", route[1]);
+    if (!media) throw new Error("Arquivo não encontrado.");
+    if (media.driveId) await trashDestinationFile(media.driveId);
+    const archived = updateMedia(media.id, { status: "archived" }, user.name);
+    return NextResponse.json({ media: archived });
+  } catch (error) {
+    if (error instanceof Error && error.message === "UNAUTHORIZED") return NextResponse.json({ error: "Autenticação necessária." }, { status: 401 });
+    return errorResponse(error);
+  }
+}

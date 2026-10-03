@@ -1,0 +1,30 @@
+{
+  "name": "murano-media-hub",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently -k -n web,worker \"next dev --webpack --hostname 127.0.0.1\" \"tsx watch server/worker.ts\"",
+    "build": "next build --webpack",
+    "start": "concurrently -k -n web,worker \"next start --hostname 127.0.0.1\" \"tsx server/worker.ts\"",
+    "worker": "tsx server/worker.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "MEDIA_HUB_DATA_DIR=.data-test tsx --test tests/*.test.ts"
+  },
+  "dependencies": {
+    "@fontsource/dm-sans": "^5.3.0",
+    "lucide-react": "^0.577.0",
+    "next": "^16.2.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "sharp": "^0.35.4",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "concurrently": "^9.2.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}
