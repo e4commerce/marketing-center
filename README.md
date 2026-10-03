@@ -49,6 +49,16 @@ MEDIA_HUB_DATA_DIR=/caminho/persistente
 
 As chaves inseridas na interface são cifradas com AES-256-GCM e guardadas no diretório de dados. O arquivo `encryption.key` e o banco SQLite precisam de volume persistente e backup protegido.
 
+### Railway
+
+1. Crie um volume no serviço e monte-o em `/data`.
+2. Configure `MEDIA_HUB_DATA_DIR=/data`.
+3. Configure `APP_URL` com o domínio público, sem barra no final.
+4. Não configure `NPM_CONFIG_PRODUCTION=true`: o build do Next precisa das dependências de TypeScript.
+5. Use os comandos padrão `npm run build` e `npm run start`.
+
+O processo web escuta `0.0.0.0:$PORT`. O worker da fila inicia junto ao servidor Next, mantendo o deploy em um único processo. O SQLite exige uma única réplica; não habilite escalonamento horizontal neste MVP.
+
 ### Google OAuth
 
 Crie um cliente OAuth do tipo **Web application**, habilite a Google Drive API e cadastre exatamente:
